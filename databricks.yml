@@ -1,0 +1,662 @@
+bundle:
+  name: access-drift
+
+workspace:
+  host: https://adb-7405615323116390.10.azuredatabricks.net
+  root_path: /Shared/access-drift
+
+sync:
+  paths:
+    - notebooks
+    - pipelines
+    - data/poc/landing/raw
+    - data/poc/eval
+    - data/dev
+    - sql/databricks/migrations
+
+variables:
+  storage_account_name:
+    description: ADLS Gen2 storage account name (Bicep output)
+    default: acdriftadls
+  cluster_id:
+    description: Databricks existing all-purpose cluster id
+    default: "0623-064735-g02akt45"
+  catalog:
+    description: Unity Catalog catalog name
+    default: access_drift_dev
+  raw_base_path:
+    description: ADLS raw input base path
+    default: abfss://lakehouse@acdriftadls.dfs.core.windows.net/raw/dev
+  seed_data_path:
+    description: Bundle-deployed Landing seed directory
+    default: data/dev/landing/raw
+  eval_seed_path:
+    description: Bundle-deployed eval ground truth JSONL path
+    default: data/dev/eval/ground_truth_case.jsonl
+  asset_context_path:
+    description: Bundle-deployed Risk Card asset context JSONL path
+    default: data/dev/context/asset_context.jsonl
+  assignment_routing_path:
+    description: Bundle-deployed Risk Card assignment routing JSONL path
+    default: data/dev/context/assignment_routing.jsonl
+  rag_doc_chunks_path:
+    description: Bundle-deployed RAG evidence chunk JSONL path
+    default: data/dev/rag/doc_chunks.jsonl
+  rag_eval_path:
+    description: Bundle-deployed RAG eval set JSONL path
+    default: data/dev/rag/rag_eval_set.jsonl
+  rag_source_docs_manifest_path:
+    description: Bundle-deployed RAG source document manifest JSONL path
+    default: data/dev/rag/source_docs_manifest.jsonl
+  rag_remediation_history_path:
+    description: Bundle-deployed synthetic remediation history JSONL path
+    default: data/dev/rag/remediation_history.jsonl
+  rag_vs_endpoint:
+    description: Databricks Vector Search endpoint name for RAG
+    default: access_drift_vs
+  rag_embedding_model:
+    description: FM API embedding endpoint for RAG index
+    default: databricks-gte-large-en
+  rag_llm_endpoint:
+    description: >-
+      Generation LLM endpoint. The default is the Databricks FM API pay-per-token endpoint,
+      so it works without an external OpenAI key or billing. It can be swapped for an External Model (access_drift_llm),
+      and if that's unavailable the chain runs on the deterministic fallback.
+    default: databricks-meta-llama-3-3-70b-instruct
+  rag_external_llm_endpoint:
+    description: Optional External Model endpoint name (managed by the rag-ops job, used once a shared OpenAI/Azure OpenAI key is available)
+    default: access_drift_llm
+  rag_llm_model_name:
+    description: External Model target model name
+    default: gpt-4o-mini
+  rag_openai_secret_scope:
+    description: Databricks secret scope that stores the OpenAI API key
+    default: access-drift-openai
+  rag_openai_secret_key:
+    description: Databricks secret key name for the OpenAI API key
+    default: api-key
+  rag_ops_dry_run:
+    description: Keep operational endpoint/gateway notebooks in dry-run mode by default
+    default: "true"
+  rag_top_k:
+    description: RAG retrieval top-k
+    default: "4"
+  context_output_root:
+    description: Bundle-deployed Risk Card context output directory
+    default: data/dev/context
+  context_seed_required:
+    description: Whether context seed files must exist for context_seed_task
+    default: "true"
+  bronze_dlt_target_schema:
+    description: Target schema for Bronze DLT writer
+    default: bronze
+  bronze_dlt_event_log_schema:
+    description: Schema for Bronze DLT pipeline event logs
+    default: bronze
+  bronze_snapshot_schema:
+    description: Existing Bronze schema to snapshot before and after dlt-test smoke validation
+    default: bronze
+  bronze_dlt_raw_base_path:
+    description: Raw input base path for Bronze DLT writer
+    default: abfss://lakehouse@acdriftadls.dfs.core.windows.net/raw/dev
+  bronze_dlt_fixture_mode:
+    description: Whether fixture-only metadata overrides are enabled
+    default: "false"
+  bronze_dlt_fixture_source_root:
+    description: Bundle-deployed Bronze DLT fixture root
+    default: data/dlt-test
+  bronze_dlt_fixture_raw_root:
+    description: ADLS root used only for Bronze DLT fixture validation
+    default: abfss://lakehouse@acdriftadls.dfs.core.windows.net/raw/dlt-test
+  silver_dlt_source_schema:
+    description: Source schema for Silver DLT writer
+    default: bronze
+  silver_dlt_source_table_prefix:
+    description: Prefix for Silver DLT source tables
+    default: ""
+  silver_dlt_target_schema:
+    description: Target schema for Silver DLT writer
+    default: silver
+  silver_dlt_event_log_schema:
+    description: Schema for Silver DLT pipeline event logs
+    default: silver
+  silver_publish_replace_existing_tables:
+    description: Whether Silver publish step may rename existing Delta tables before creating stable views
+    default: "false"
+  dlt_cutover_enabled:
+    description: Whether one-time Bronze/Silver DLT cutover preparation may run
+    default: "false"
+  dlt_cutover_replace_existing_tables:
+    description: Whether DLT cutover preparation may rename existing Bronze Delta tables to legacy names
+    default: "false"
+  dev_seed_size:
+    description: Number of dev synthetic cases to generate
+    default: "20"
+  dev_seed:
+    description: Deterministic seed for dev synthetic data generation
+    default: "35"
+  dev_reference_date:
+    description: Reference date for dev synthetic data generation
+    default: "2026-06-29"
+  generate_dev_seed_enabled:
+    description: Whether generate_dev_seed_task should create dev seed files
+    default: "true"
+
+targets:
+  # poc: target for reproducing/verifying the PoC. Uses the existing access_drift catalog and the raw/ path.
+  poc:
+    variables:
+      catalog: access_drift
+      raw_base_path: abfss://lakehouse@acdriftadls.dfs.core.windows.net/raw
+      seed_data_path: data/poc/landing/raw
+      eval_seed_path: data/poc/eval/ground_truth_case.jsonl
+      context_seed_required: "false"
+      generate_dev_seed_enabled: "false"
+
+  # dev: main development run target. The representative demo cases are also included in the dev synthetic data.
+  dev:
+    default: true
+    resources:
+      pipelines:
+        bronze_dlt_writer:
+          name: access-drift-bronze-dlt-${bundle.target}
+          catalog: ${var.catalog}
+          target: ${var.bronze_dlt_target_schema}
+          serverless: true
+          development: true
+          continuous: false
+          edition: ADVANCED
+          libraries:
+            - file:
+                path: ./pipelines/bronze_dlt.py
+          configuration:
+            bronze.raw_base_path: ${var.bronze_dlt_raw_base_path}
+            bronze.fixture_mode: ${var.bronze_dlt_fixture_mode}
+            pipelines.metrics.flowTimeReporter.enabled: "true"
+          event_log:
+            catalog: ${var.catalog}
+            schema: ${var.bronze_dlt_event_log_schema}
+            name: bronze_dlt_event_log
+
+        silver_dlt_writer:
+          name: access-drift-silver-dlt-${bundle.target}
+          catalog: ${var.catalog}
+          target: ${var.silver_dlt_target_schema}
+          serverless: true
+          development: true
+          continuous: false
+          edition: ADVANCED
+          libraries:
+            - file:
+                path: ./pipelines/silver_dlt.py
+          configuration:
+            silver.source_catalog: ${var.catalog}
+            silver.source_schema: ${var.silver_dlt_source_schema}
+            silver.source_table_prefix: ${var.silver_dlt_source_table_prefix}
+            pipelines.metrics.flowTimeReporter.enabled: "true"
+          event_log:
+            catalog: ${var.catalog}
+            schema: ${var.silver_dlt_event_log_schema}
+            name: silver_dlt_event_log
+
+      jobs:
+        access-drift-pipeline:
+          name: access-drift-pipeline
+          tasks:
+            - task_key: migration_task
+              description: Apply DDL — create non-DLT objects; Bronze/Silver DDL is owned by DLT
+              notebook_task:
+                notebook_path: ./notebooks/00_apply_migrations.ipynb
+                base_parameters:
+                  catalog: ${var.catalog}
+                  skip_bronze_silver_ddl: "true"
+              existing_cluster_id: ${var.cluster_id}
+
+            - task_key: generate_dev_seed_task
+              description: Generate dev synthetic Landing/Eval/Context JSONL in the Databricks workspace
+              notebook_task:
+                notebook_path: ./notebooks/09_generate_dev_seed.ipynb
+                base_parameters:
+                  seed_data_path: ${var.seed_data_path}
+                  eval_seed_path: ${var.eval_seed_path}
+                  context_output_root: ${var.context_output_root}
+                  dev_seed_size: ${var.dev_seed_size}
+                  dev_seed: ${var.dev_seed}
+                  dev_reference_date: ${var.dev_reference_date}
+                  generate_dev_seed_enabled: ${var.generate_dev_seed_enabled}
+              existing_cluster_id: ${var.cluster_id}
+
+            - task_key: synthetic_data_task
+              description: Copy the generated bundle seed files to each target's ADLS raw path
+              depends_on:
+                - task_key: migration_task
+                - task_key: generate_dev_seed_task
+              notebook_task:
+                notebook_path: ./notebooks/01_synthetic_data.ipynb
+                base_parameters:
+                  catalog: ${var.catalog}
+                  storage_account: ${var.storage_account_name}
+                  raw_base: ${var.raw_base_path}
+                  seed_data_path: ${var.seed_data_path}
+              existing_cluster_id: ${var.cluster_id}
+
+            - task_key: bronze_dlt_task
+              description: ADLS raw JSONL → Bronze DLT materialized views + expectation
+              depends_on:
+                - task_key: synthetic_data_task
+                - task_key: prepare_dlt_cutover_task
+              pipeline_task:
+                pipeline_id: ${resources.pipelines.bronze_dlt_writer.id}
+                full_refresh: true
+
+            - task_key: prepare_dlt_cutover_task
+              description: One-time DLT cutover guard — check whether to legacy-rename the existing Bronze table
+              depends_on:
+                - task_key: migration_task
+              notebook_task:
+                notebook_path: ./notebooks/13_prepare_dlt_cutover.py
+                base_parameters:
+                  catalog: ${var.catalog}
+                  bronze_schema: ${var.bronze_dlt_target_schema}
+                  cutover_enabled: ${var.dlt_cutover_enabled}
+                  replace_existing_tables: ${var.dlt_cutover_replace_existing_tables}
+              existing_cluster_id: ${var.cluster_id}
+
+            - task_key: silver_dlt_task
+              description: Bronze DLT → Silver DLT staging materialized views + integrity audit
+              depends_on:
+                - task_key: bronze_dlt_task
+              pipeline_task:
+                pipeline_id: ${resources.pipelines.silver_dlt_writer.id}
+                full_refresh: true
+
+            - task_key: publish_silver_views_task
+              description: Publish the Silver DLT staging output as a stable Silver view
+              depends_on:
+                - task_key: silver_dlt_task
+              notebook_task:
+                notebook_path: ./notebooks/12_publish_silver_views.py
+                base_parameters:
+                  catalog: ${var.catalog}
+                  schema: ${var.silver_dlt_target_schema}
+                  staging_prefix: silver_dlt_
+                  replace_existing_tables: ${var.silver_publish_replace_existing_tables}
+              existing_cluster_id: ${var.cluster_id}
+
+            - task_key: eval_seed_task
+              description: Load the eval ground_truth_case seed + verify Silver matching (independent of the detection pipeline)
+              depends_on:
+                - task_key: publish_silver_views_task
+              notebook_task:
+                notebook_path: ./notebooks/04_eval_seed.ipynb
+                base_parameters:
+                  catalog: ${var.catalog}
+                  eval_seed_path: ${var.eval_seed_path}
+              existing_cluster_id: ${var.cluster_id}
+
+            - task_key: context_seed_task
+              description: Load the Risk Card context seed + verify Silver/Eval matching
+              depends_on:
+                - task_key: eval_seed_task
+              notebook_task:
+                notebook_path: ./notebooks/08_context_seed.ipynb
+                base_parameters:
+                  catalog: ${var.catalog}
+                  asset_context_path: ${var.asset_context_path}
+                  assignment_routing_path: ${var.assignment_routing_path}
+                  context_seed_required: ${var.context_seed_required}
+              existing_cluster_id: ${var.cluster_id}
+
+            - task_key: intermediate_task
+              description: Silver → generate NHI residual access finding candidates
+              depends_on:
+                - task_key: publish_silver_views_task
+              notebook_task:
+                notebook_path: ./notebooks/05_intermediate.ipynb
+                base_parameters:
+                  catalog: ${var.catalog}
+                  run_id: "{{job.run_id}}"
+              existing_cluster_id: ${var.cluster_id}
+
+            - task_key: gold_task
+              description: Intermediate finding → load Gold Core for the Risk Card
+              depends_on:
+                - task_key: intermediate_task
+              notebook_task:
+                notebook_path: ./notebooks/06_gold.ipynb
+                base_parameters:
+                  catalog: ${var.catalog}
+                  run_id: "{{job.run_id}}"
+              existing_cluster_id: ${var.cluster_id}
+
+            - task_key: rag_doc_chunks_seed_task
+              description: RAG evidence chunk → load into rag.doc_chunks
+              depends_on:
+                - task_key: migration_task
+              notebook_task:
+                notebook_path: ./notebooks/10_rag_evidence_seed.ipynb
+                base_parameters:
+                  catalog: ${var.catalog}
+                  rag_doc_chunks_path: ${var.rag_doc_chunks_path}
+                  run_id: "{{job.run_id}}"
+              existing_cluster_id: ${var.cluster_id}
+
+  # dlt-test: target dedicated to Bronze/Silver expectation verification, separate from the existing dev job deployment.
+  dlt-test:
+    workspace:
+      root_path: /Shared/access-drift-dlt-test
+    variables:
+      bronze_dlt_target_schema: dlt_test
+      bronze_dlt_event_log_schema: dlt_test
+      bronze_dlt_raw_base_path: abfss://lakehouse@acdriftadls.dfs.core.windows.net/raw/dlt-test/valid/landing/raw
+      bronze_dlt_fixture_mode: "true"
+      silver_dlt_source_schema: dlt_test
+      silver_dlt_source_table_prefix: silver_valid_
+      silver_dlt_target_schema: dlt_test
+      silver_dlt_event_log_schema: dlt_test
+    sync:
+      paths:
+        - data/dlt-test
+    resources:
+      pipelines:
+        bronze-dlt-expectations:
+          name: access-drift-bronze-expectations-${bundle.target}
+          catalog: ${var.catalog}
+          target: ${var.bronze_dlt_target_schema}
+          serverless: true
+          development: true
+          continuous: false
+          edition: ADVANCED
+          libraries:
+            - file:
+                path: ./notebooks/08_bronze_dlt_expectations.py
+          configuration:
+            bronze.raw_base_path: ${var.bronze_dlt_raw_base_path}
+            bronze.fixture_mode: ${var.bronze_dlt_fixture_mode}
+            pipelines.metrics.flowTimeReporter.enabled: "true"
+          event_log:
+            catalog: ${var.catalog}
+            schema: ${var.bronze_dlt_event_log_schema}
+            name: bronze_dlt_expectations_event_log
+
+        silver-dlt-expectations:
+          name: access-drift-silver-expectations-${bundle.target}
+          catalog: ${var.catalog}
+          target: ${var.silver_dlt_target_schema}
+          serverless: true
+          development: true
+          continuous: false
+          edition: ADVANCED
+          libraries:
+            - file:
+                path: ./notebooks/10_silver_dlt_expectations.py
+          configuration:
+            silver.source_catalog: ${var.catalog}
+            silver.source_schema: ${var.silver_dlt_source_schema}
+            silver.source_table_prefix: ${var.silver_dlt_source_table_prefix}
+            pipelines.metrics.flowTimeReporter.enabled: "true"
+          event_log:
+            catalog: ${var.catalog}
+            schema: ${var.silver_dlt_event_log_schema}
+            name: silver_dlt_expectations_event_log
+
+      jobs:
+        bronze-dlt-fixture-setup:
+          name: access-drift-bronze-dlt-fixture-setup
+          tasks:
+            - task_key: copy_bronze_dlt_fixtures
+              description: Copy the valid/invalid Bronze DLT fixtures to an isolated ADLS raw/dlt-test path
+              notebook_task:
+                notebook_path: ./notebooks/08_prepare_bronze_dlt_fixtures.py
+                base_parameters:
+                  fixture_source_root: ${var.bronze_dlt_fixture_source_root}
+                  fixture_workspace_root: ${workspace.file_path}
+                  fixture_raw_root: ${var.bronze_dlt_fixture_raw_root}
+              existing_cluster_id: ${var.cluster_id}
+
+        silver-dlt-fixture-setup:
+          name: access-drift-silver-dlt-fixture-setup
+          tasks:
+            - task_key: prepare_silver_dlt_fixtures
+              description: Prepare the existing Bronze as isolated valid/invalid/empty Silver DLT inputs
+              notebook_task:
+                notebook_path: ./notebooks/10_prepare_silver_dlt_fixtures.py
+                base_parameters:
+                  catalog: ${var.catalog}
+                  source_schema: bronze
+                  target_schema: ${var.silver_dlt_source_schema}
+              existing_cluster_id: ${var.cluster_id}
+
+        bronze-dlt-result-check:
+          name: access-drift-bronze-dlt-result-check
+          tasks:
+            - task_key: check_bronze_dlt_expectation_result
+              description: Query and adjudicate the existing Bronze DLT expectation run results and event log, keyed by update_id
+              notebook_task:
+                notebook_path: ./notebooks/10_check_dlt_expectation_result.py
+                base_parameters:
+                  catalog: ${var.catalog}
+                  schema: ${var.bronze_dlt_target_schema}
+                  event_log_schema: ${var.bronze_dlt_event_log_schema}
+                  event_log_table: bronze_dlt_expectations_event_log
+                  update_id: ""
+                  expected_case: valid
+              existing_cluster_id: ${var.cluster_id}
+
+        bronze-table-snapshot:
+          name: access-drift-bronze-table-snapshot
+          tasks:
+            - task_key: snapshot_existing_bronze_tables
+              description: Collect the existing Bronze table row count and last_altered before and after the dlt-test run, for comparison
+              notebook_task:
+                notebook_path: ./notebooks/11_check_bronze_table_snapshot.py
+                base_parameters:
+                  catalog: ${var.catalog}
+                  schema: ${var.bronze_snapshot_schema}
+              existing_cluster_id: ${var.cluster_id}
+
+resources:
+  jobs:
+    access-drift-legacy-pipeline:
+      name: access-drift-legacy-pipeline
+      tasks:
+        - task_key: migration_task
+          description: Apply DDL — run sql/databricks/migrations/*.sql in order
+          notebook_task:
+            notebook_path: ./notebooks/00_apply_migrations.ipynb
+            base_parameters:
+              catalog: ${var.catalog}
+          existing_cluster_id: ${var.cluster_id}
+
+        - task_key: generate_dev_seed_task
+          description: Generate dev synthetic Landing/Eval/Context JSONL in the Databricks workspace
+          notebook_task:
+            notebook_path: ./notebooks/09_generate_dev_seed.ipynb
+            base_parameters:
+              seed_data_path: ${var.seed_data_path}
+              eval_seed_path: ${var.eval_seed_path}
+              context_output_root: ${var.context_output_root}
+              dev_seed_size: ${var.dev_seed_size}
+              dev_seed: ${var.dev_seed}
+              dev_reference_date: ${var.dev_reference_date}
+              generate_dev_seed_enabled: ${var.generate_dev_seed_enabled}
+          existing_cluster_id: ${var.cluster_id}
+
+        - task_key: synthetic_data_task
+          description: Copy the generated bundle seed files to each target's ADLS raw path
+          depends_on:
+            - task_key: migration_task
+            - task_key: generate_dev_seed_task
+          notebook_task:
+            notebook_path: ./notebooks/01_synthetic_data.ipynb
+            base_parameters:
+              catalog: ${var.catalog}
+              storage_account: ${var.storage_account_name}
+              raw_base: ${var.raw_base_path}
+              seed_data_path: ${var.seed_data_path}
+          existing_cluster_id: ${var.cluster_id}
+
+        - task_key: ingest_task
+          description: ADLS raw/ JSONL → Bronze Delta
+          depends_on:
+            - task_key: synthetic_data_task
+          notebook_task:
+            notebook_path: ./notebooks/02_ingest.ipynb
+            base_parameters:
+              catalog: ${var.catalog}
+              storage_account: ${var.storage_account_name}
+              raw_base: ${var.raw_base_path}
+          existing_cluster_id: ${var.cluster_id}
+
+        - task_key: silver_task
+          description: Bronze → Silver normalisation and basic quality checks
+          depends_on:
+            - task_key: ingest_task
+          notebook_task:
+            notebook_path: ./notebooks/03_silver.ipynb
+            base_parameters:
+              catalog: ${var.catalog}
+          existing_cluster_id: ${var.cluster_id}
+
+        - task_key: eval_seed_task
+          description: Load the eval ground_truth_case seed + verify Silver matching (independent of the detection pipeline)
+          depends_on:
+            - task_key: silver_task
+          notebook_task:
+            notebook_path: ./notebooks/04_eval_seed.ipynb
+            base_parameters:
+              catalog: ${var.catalog}
+              eval_seed_path: ${var.eval_seed_path}
+          existing_cluster_id: ${var.cluster_id}
+
+        - task_key: context_seed_task
+          description: Load the Risk Card context seed + verify Silver/Eval matching
+          depends_on:
+            - task_key: eval_seed_task
+          notebook_task:
+            notebook_path: ./notebooks/08_context_seed.ipynb
+            base_parameters:
+              catalog: ${var.catalog}
+              asset_context_path: ${var.asset_context_path}
+              assignment_routing_path: ${var.assignment_routing_path}
+              context_seed_required: ${var.context_seed_required}
+          existing_cluster_id: ${var.cluster_id}
+
+        - task_key: intermediate_task
+          description: Silver → generate NHI residual access finding candidates
+          depends_on:
+            - task_key: silver_task
+          notebook_task:
+            notebook_path: ./notebooks/05_intermediate.ipynb
+            base_parameters:
+              catalog: ${var.catalog}
+              run_id: "{{job.run_id}}"
+          existing_cluster_id: ${var.cluster_id}
+
+        - task_key: gold_task
+          description: Intermediate finding → load Gold Core for the Risk Card
+          depends_on:
+            - task_key: intermediate_task
+          notebook_task:
+            notebook_path: ./notebooks/06_gold.ipynb
+            base_parameters:
+              catalog: ${var.catalog}
+              run_id: "{{job.run_id}}"
+          existing_cluster_id: ${var.cluster_id}
+
+        - task_key: rag_doc_chunks_seed_task
+          description: RAG evidence chunk → load into rag.doc_chunks
+          depends_on:
+            - task_key: migration_task
+          notebook_task:
+            notebook_path: ./notebooks/10_rag_evidence_seed.ipynb
+            base_parameters:
+              catalog: ${var.catalog}
+              rag_doc_chunks_path: ${var.rag_doc_chunks_path}
+              run_id: "{{job.run_id}}"
+          existing_cluster_id: ${var.cluster_id}
+
+        - task_key: rag_vector_index_task
+          description: rag.doc_chunks → create/sync the Vector Search Delta Sync index
+          depends_on:
+            - task_key: rag_doc_chunks_seed_task
+          notebook_task:
+            notebook_path: ./notebooks/12_rag_vector_index.ipynb
+            base_parameters:
+              catalog: ${var.catalog}
+              vs_endpoint: ${var.rag_vs_endpoint}
+              embedding_model: ${var.rag_embedding_model}
+          existing_cluster_id: ${var.cluster_id}
+          libraries:
+            - pypi:
+                package: databricks-vectorsearch
+
+        - task_key: rag_chain_task
+          description: gold_core finding → evidence retrieval + recommended-action generation (citation/fallback) → rag.recommended_action
+          depends_on:
+            - task_key: rag_vector_index_task
+            - task_key: gold_task
+          notebook_task:
+            notebook_path: ./notebooks/13_rag_chain.ipynb
+            base_parameters:
+              catalog: ${var.catalog}
+              vs_endpoint: ${var.rag_vs_endpoint}
+              llm_endpoint: ${var.rag_llm_endpoint}
+              top_k: ${var.rag_top_k}
+              run_id: "{{job.run_id}}"
+          existing_cluster_id: ${var.cluster_id}
+          libraries:
+            - pypi:
+                package: databricks-vectorsearch
+
+
+    access-drift-rag-ops:
+      name: access-drift-rag-ops
+      tasks:
+        - task_key: rag_source_docs_history_seed_task
+          description: UC source docs manifest + synthetic remediation history seed
+          notebook_task:
+            notebook_path: ./notebooks/17_rag_source_docs_and_history_seed.ipynb
+            base_parameters:
+              catalog: ${var.catalog}
+              source_docs_manifest_path: ${var.rag_source_docs_manifest_path}
+              remediation_history_path: ${var.rag_remediation_history_path}
+              run_id: "{{job.run_id}}"
+          existing_cluster_id: ${var.cluster_id}
+
+        - task_key: rag_external_model_endpoint_task
+          description: Create/validate External Model endpoint access_drift_llm -> OpenAI gpt-4o-mini (dry-run by default)
+          notebook_task:
+            notebook_path: ./notebooks/15_register_external_model_endpoint.ipynb
+            base_parameters:
+              endpoint_name: ${var.rag_external_llm_endpoint}
+              model_name: ${var.rag_llm_model_name}
+              secret_scope: ${var.rag_openai_secret_scope}
+              secret_key: ${var.rag_openai_secret_key}
+              dry_run: ${var.rag_ops_dry_run}
+              test_after_create: "true"
+          existing_cluster_id: ${var.cluster_id}
+
+        - task_key: rag_ai_gateway_policy_task
+          description: Log/apply AI Gateway policy contract for RAG endpoint (dry-run by default)
+          depends_on:
+            - task_key: rag_external_model_endpoint_task
+          notebook_task:
+            notebook_path: ./notebooks/16_configure_ai_gateway_guardrails.ipynb
+            base_parameters:
+              endpoint_name: ${var.rag_external_llm_endpoint}
+              dry_run: ${var.rag_ops_dry_run}
+          existing_cluster_id: ${var.cluster_id}
+
+        - task_key: rag_governance_report_task
+          description: RAG ethics, citation, source-doc, and cost/throughput assessment tables
+          depends_on:
+            - task_key: rag_source_docs_history_seed_task
+          notebook_task:
+            notebook_path: ./notebooks/18_rag_governance_report.ipynb
+            base_parameters:
+              catalog: ${var.catalog}
+              run_id: "{{job.run_id}}"
+              llm_endpoint: ${var.rag_llm_endpoint}
+              vs_endpoint: ${var.rag_vs_endpoint}
+          existing_cluster_id: ${var.cluster_id}

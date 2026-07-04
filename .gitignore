@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Streamlit local secrets (never commit real tokens)
+apps/dashboard/.streamlit/secrets.toml
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
