@@ -13,6 +13,48 @@ Databricks-native RAG layer that generates grounded, cited remediation advice.
 > live in the original team repo and are not included here. It's meant to show the code and
 > design I authored, not to run end-to-end on its own.
 
+## System architecture
+
+The architecture below shows the end-to-end flow I designed around evidence ingestion,
+Databricks Lakehouse processing, risk detection, RAG-based remediation guidance, and
+SecOps follow-up actions.
+
+![Access Drift architecture](docs/accessdrift-architecture.png)
+
+## Portfolio screenshots
+
+### Risk Card dashboard
+
+The Streamlit dashboard presents each detected access drift case as a Risk Card. It shows
+the affected NHI, active credential state, sensitive asset path, risk summary, and the
+factors that triggered the critical classification.
+
+![Risk Card dashboard](<docs/Screenshot(ENG)/Main-Dashboard.png>)
+
+### Databricks workflow pipeline
+
+The Databricks workflow coordinates synthetic evidence generation, migration, DLT
+processing, RAG document chunk indexing, evaluation, and gold table publishing. The run
+history demonstrates that the pipeline can be operated repeatedly from Databricks Jobs.
+
+![Databricks workflow pipeline](<docs/Screenshot(ENG)/Databricks-pipeline.png>)
+
+### RAG evaluation query
+
+This SQL check summarizes RAG evaluation results by answer source, including retrieval
+recall, citation rate, groundedness, and correctness. I used this to validate that
+generated remediation guidance stayed grounded in retrieved policy/runbook evidence.
+
+![RAG evaluation SQL](<docs/Screenshot(ENG)/RAG-SQL.png>)
+
+### Jira ticket detail
+
+Detected findings can be converted into Jira work items with the case ID, risk rationale,
+evidence, severity, and recommended action. This screen shows how the analytical output is
+translated into an operational follow-up ticket.
+
+![Jira ticket detail](<docs/Screenshot(ENG)/Jiraticket-detail.png>)
+
 ## What's mine here
 
 ### RAG chain & AI Agent (Databricks-native RAG)
